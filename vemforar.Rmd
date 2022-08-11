@@ -1,0 +1,193 @@
+---
+title: "Untitled"
+author: "zhuofan wang"
+date: "2021/9/23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{R warning=FALSE}
+#package prepared
+library(EnvStats)
+library(mgcv)
+library(microbenchmark)
+#microbenchmark(power_iter(A),power_iter_sparse(A_spar),times = 10)
+```
+
+
+```{r}
+#function prepared
+
+#get function of AR prior precision matrix (inverse of covariance matrix)
+
+sigma_inv_prior <- function(A,Q){
+  Sigma <- matrix(0,nrow = T,ncol = T)
+  diag(Sigma) <- 1+A^2
+  sdiag(Sigma,1) <- -A
+  sdiag(Sigma,-1) <- -A
+  Sigma[T,T] <- 1
+  Sigma[1,1] <- 1
+  return(Sigma/Q)
+}
+
+
+
+#function to calculate mean of polya-gamma variable PG(1,x)
+mpg <- function(x){
+  return((exp(x)-1)/(2*x*(1+exp(x))))
+}
+
+
+#function to calculate the element-wise product of z_i and z_j, i.e.in_prod[i,j,t] = z[t,i]*z[t,j] 
+#input z is a matrix of t $\times$ n
+in_prod <- function(z){
+  temp <- apply(z, 2, function(v){return(apply(z, 2, function(u){return(u*v)}))})
+  temp <- array(temp,dim = c(T,n,n))
+  temp <- aperm(temp,perm = c(2,3,1))
+  temp <- apply(temp, 3, function(t){
+    diag(t) <- 0
+    return(t)})
+  temp <- array(temp,dim = c(n,n,T))
+  return(temp)
+}
+
+
+#function to derive the al_sum, whhere al_sum[i,j,t]=alpha[i]+alpha[j]
+al_sum_f <- function(alpha){
+  al_matrix <- matrix(rep(alpha,n),nrow = n)
+  al_matrix <- al_matrix+t(al_matrix)
+  al_array <- array(rep(al_matrix,T),dim = c(n,n,T))
+  return(al_array)
+}
+
+
+#function to calculate E(theta^2)(note:Ez2[t,i] = Ez[i,t]^2)
+Etheta2 <- function(alpha,mu,Ez2){
+  al_sum <- al_sum_f(alpha)
+  result <- in_prod(Ez2)+2*al_sum*in_prod(mu)+al_sum^2
+  return(sqrt(result))
+}
+sp_inv <- sigma_inv_prior(0.9,0.5)
+
+```
+
+
+
+```{r}
+T <- 40
+n <- 15
+beta_r <- rep(0,T)
+#alpha <- runif(n,min = 1,max = 3)
+#alpha <- -alpha/sum(alpha)
+#al_sum <- al_sum_f(alpha)
+
+A <- diag(n)
+
+
+#mu1 <- -1
+#mu2 <- 1
+z <- matrix(0, nrow = n, ncol =T)
+beta_r[1] <- rnorm(1)
+#z[1:(n/2),1] <- mu1
+#z[(n/2+1):n,1] <- mu2
+z[,1] <- rnorm(n)
+for (t in 2:T) {
+  z[,t] <- A%*%z[,t-1]+0.7*rnorm(n,0,1)
+  beta_r[t] <- beta_r[t-1]+rnorm(1,0,1)
+}
+z_prod <- in_prod(t(z))
+
+theta <- array(0,c(n,n,T))
+
+Y <- array(0,c(n,n,T))
+
+
+for (t in 1:T) {
+  for (i in 1:(n-1)) {
+   for (j in (i+1):n) {
+    theta[i,j,t] <- beta_r[t]+z_prod[i,j,t]
+    Y[i,j,t] <- rbinom(1,1,plogis(theta[i,j,t]))
+  }
+}
+ Y[,,t][lower.tri(Y[,,t])] <- t(Y[,,t])[lower.tri(t(Y[,,t]))]
+ 
+}
+y<- Y
+```
+```{r}
+plot(beta_r)
+```
+
+```{r}
+iter <- 100
+```
+
+
+
+```{r}
+kmu<- 0.1
+kx <- 0.1
+KMU <- sapply(1:T, function(t1){
+    sapply(1:T, function(t2){
+      covm(1,kmu,t1,t2)
+    })
+  })
+KX <- sapply(1:T, function(t1){
+    sapply(1:T, function(t2){
+      covm(1,kx,t1,t2)
+    })
+  })
+
+```
+
+```{r}
+vem <- function(T,iter,sp_inv,y){
+  #initialize
+  
+  beta <- rep(0,T)
+  
+  mu_x <- matrix(rnorm(n*T),nrow = n,ncol = T)
+  var_x <- matrix(rnorm(n*T),nrow = n,ncol = T)
+  m2_x <- mu_x^2+var_x
+  w <- array(0.25,dim = c(n,n,T))
+  
+  for (k in 1:iter) {
+    beta_old <- beta
+    temp <- solve(sp_inv+0.5*diag(apply(w,3,sum)))
+    betat <-0.5*apply(y-w*in_prod(t(mu_x)),3,sum)-0.25*n*(n-1)
+    beta <- temp%*%betat
+    for (i in 1:n) {
+    temp1 <- solve(sp_inv+diag(colSums(w[i,-i,]*m2_x[-i,])))
+    temp2 <- colSums((y[i,-i,]-0.5-sweep(w[i,-i,],2,beta,"*"))*mu_x[-i,])
+    mu_x[i,] <- temp1%*%temp2
+    var_x[i,] <- diag(temp1)
+    for (j in 1:i ) {
+      
+      for (t in 1:T) {
+        c <- beta[t]+mu_x[i,t]*mu_x[j,t]
+        w[i,j,t] <- tanh(0.5*c)/(2*c)
+        w[i,i,t] <- 0
+        w[j,i,t] <- w[i,j,t]
+      }
+    }
+    }
+    if(norm(beta-beta_old)/norm(beta) <0.001*T)
+      break
+  }
+  return(beta)
+}
+
+```
+
+
+```{r}
+
+plot(beta)
+```
+
+
+\text { Intel(R) Core(TM) i5-6200U CPU @ 2.30GHz }4 core

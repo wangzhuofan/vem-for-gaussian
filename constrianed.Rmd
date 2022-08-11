@@ -1,0 +1,414 @@
+---
+title: "yyy"
+author: "zhuofan wang"
+date: "2021/8/8"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+diag(sp_inv) <- diag(sp_inv)+phi_inv
+      tempsig <- solve(sp_inv)
+      mu_cavi[,i] <- tempsig%*%(psi)
+      a <- -sp_inv[1,2]
+      b <- sum(diag(sp_inv))
+      c <- b/a
+      Ahat <- (c-sqrt(c^2-4*T*(T-2)))/(2*(T-2))
+      Qhat <- Ahat/a
+      sigma_cavi[,,i] <- solve(sigma_inv_prior(Ahat,Qhat))
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+
+```{R warning=FALSE}
+#package prepared
+library(EnvStats)
+library(mgcv)
+library(microbenchmark)
+#microbenchmark(power_iter(A),power_iter_sparse(A_spar),times = 10)
+```
+
+
+```{r}
+#function prepared
+
+#get function of AR prior precision matrix (inverse of covariance matrix)
+
+sigma_inv_prior <- function(A,Q){
+  Sigma <- matrix(0,nrow = T,ncol = T)
+  diag(Sigma) <- 1+A^2
+  sdiag(Sigma,1) <- -A
+  sdiag(Sigma,-1) <- -A
+  Sigma[T,T] <- 1
+  Sigma[1,1] <- 1
+  return(Sigma/Q^2)
+}
+
+
+
+#function to calculate mean of polya-gamma variable PG(1,x)
+mpg <- function(x){
+  return((exp(x)-1)/(2*x*(1+exp(x))))
+}
+
+
+#function to calculate the element-wise product of z_i and z_j, i.e.in_prod[i,j,t] = z[t,i]*z[t,j] 
+#input z is a matrix of t $\times$ n
+in_prod <- function(z){
+  temp <- apply(z, 2, function(v){return(apply(z, 2, function(u){return(u*v)}))})
+  temp <- array(temp,dim = c(T,n,n))
+  temp <- aperm(temp,perm = c(2,3,1))
+  temp <- apply(temp, 3, function(t){
+    diag(t) <- 0
+    return(t)})
+  temp <- array(temp,dim = c(n,n,T))
+  return(temp)
+}
+
+
+#function to derive the al_sum, whhere al_sum[i,j,t]=alpha[i]+alpha[j]
+al_sum_f <- function(alpha){
+  al_matrix <- matrix(rep(alpha,n),nrow = n)
+  al_matrix <- al_matrix+t(al_matrix)
+  al_array <- array(rep(al_matrix,T),dim = c(n,n,T))
+  return(al_array)
+}
+
+
+#function to calculate E(theta^2)(note:Ez2[t,i] = Ez[i,t]^2)
+Etheta2 <- function(alpha,mu,Ez2){
+  al_sum <- al_sum_f(alpha)
+  result <- in_prod(Ez2)+2*al_sum*in_prod(mu)+al_sum^2
+  return(sqrt(result))
+}
+
+KL <- function(sigma){
+
+    cros <- sum(sdiag(sigma,1))
+    sd <- sum(diag(sigma))-sigma[1,1]-sigma[T,T]
+    c <- sum(diag(sigma))
+    A <- polyroot(c(sd*(1-T),(T-2)*cros,c+T*sd,-T*cros))
+    A <- A[abs(Im(A)) <= 1e-10]
+    A <- Re(A)
+    A <- A[A>0&A<1]
+    A <- min(A)
+    Q <- (-2*A*cros+sd*A^2+c)/T
+
+  return(c(A,Q))
+}
+```
+
+---------------Data generation----------------
+
+
+```{r}
+
+T <- 50
+n <- 20
+alpha <- runif(n,min = 1,max = 3)
+alpha <- -alpha/sum(alpha)
+al_sum <- al_sum_f(alpha)
+
+A <- 0.6*diag(n)
+
+
+#mu1 <- -1
+#mu2 <- 1
+z <- matrix(0, nrow = n, ncol =T)
+#z[1:(n/2),1] <- mu1
+#z[(n/2+1):n,1] <- mu2
+z[,1] <- rnorm(n)
+for (t in 2:T) {
+  z[,t] <- A%*%z[,t-1]+0.7*rnorm(n,0,1)
+}
+z_prod <- in_prod(t(z))
+
+theta <- array(0,c(n,n,T))
+
+Y <- array(0,c(n,n,T))
+
+theta <- al_sum+z_prod
+for (t in 1:T) {
+  for (i in 1:(n-1)) {
+   for (j in (i+1):n) {
+
+    Y[i,j,t] <- rbinom(1,1,plogis(theta[i,j,t]))
+  }
+}
+ Y[,,t][lower.tri(Y[,,t])] <- t(Y[,,t])[lower.tri(t(Y[,,t]))]
+ 
+}
+
+
+
+```
+
+---------------Variational EM-----------------
+
+
+------------------E-step:CAVI iteration-------------------
+
+
+------initialization------
+
+```{r}
+A_em <- 0.9
+Q_em <- 0.9
+
+
+
+
+
+```
+
+```{r}
+
+#iteration
+VE <- function(A_em,Q_em,alpha_em,k){
+  
+  mu_cavi <- 0.2*array(rnorm(T*n),dim = c(T,n))
+  
+  sigma_cavi <- array(0,dim = c(T,T,n))
+  
+  varz <- apply(sigma_cavi, 3, function(s){return(diag(s))})
+  
+  
+  Ez2 <- mu_cavi^2+varz
+
+  
+  Omega <- array(0.1,dim = c(n,n,T))
+  
+  
+  
+
+  for (iter in 1:k) {
+   Ew <- mpg(Omega)
+   temp <- mu_cavi
+    for (i in 1:n) {
+    
+      sp_inv <- sigma_inv_prior(A_em,Q_em)
+      #mu_pr <- sp_inv%*%mu1[i,]
+      
+
+      phi_inv <- colSums(Ew[i,-i,]*t(Ez2[,-i]))
+      psi <- colSums((Y[i,-i,]-0.5)*t(mu_cavi[,-i]))
+    
+    
+     
+      diag(sp_inv) <- diag(sp_inv)+phi_inv
+      tempsig <- solve(sp_inv)
+      mu_cavi[,i] <- tempsig%*%(psi)
+      a <- -sp_inv[1,2]
+      b <- sum(diag(sp_inv))
+      c <- b/a
+      Ahat <- (c-sqrt(c^2-4*T*(T-2)))/(2*(T-2))
+      Qhat <- Ahat/a
+      sigma_cavi[,,i] <- solve(sigma_inv_prior(Ahat,Qhat))
+      varz[,i] <- diag(sigma_cavi[,,i])
+      Ez2[,i] <- mu_cavi[,i]^2+varz[,i]
+    
+   
+    }
+   if(norm(mu_cavi,type = "F")^2<10e-8*n*T){
+     mu_cavi <- 0
+     break
+   }
+   if(norm(temp-mu_cavi,type = "F")^2/norm(mu_cavi,type = "F")^2<0.0005)
+     break
+  Omega <- Etheta2(rep(0,n),mu_cavi,Ez2)
+  
+  }
+  
+  result <- list()
+  result[["mu"]] <- mu_cavi
+  result[["sigma"]] <- sigma_cavi
+  result[["Ew"]] <- Ew
+  result[["Ez2"]] <- Ez2
+  return(result)
+}
+
+```
+
+
+```{r}
+plot(mu_cavi[1,])
+plot(mu_cavi[2,])
+plot(mu_cavi[,1])
+plot(z[1,])
+```
+
+---------------------------M-step--------------------------
+```{R}
+VM <- function(mu_cavi,sigma_cavi,Ew,Ez2){
+  #sdiag:function in package "mgcv" to derive the super-diag of matrix
+  
+  Ecros <- sum(mu_cavi[-1,]*mu_cavi[-T,]+apply(sigma_cavi,3,function(s){return(sdiag(s,1))}))
+  
+  
+  A_em <- Ecros/sum(Ez2[-T,])
+  
+  
+  
+  Q_em <- sqrt((sum(Ez2[-1,])-A_em^2*sum(Ez2[-T,]))/(n*(T-1)))
+  #S <- apply(Ew,c(1,2),sum)
+  #Q_em <- 1
+  
+  #diag(S) <- 0
+  #diag(S) <- 0.5*rowSums(S)
+  
+  
+  #lm <- Y-0.5-Ew*(in_prod(mu_cavi))
+  #del <- apply(lm, 3, function(s){return(diag(s))})
+  
+  
+  #l <- apply(lm,1,sum) - rowSums(del)
+  #alpha_em <- 0.5*solve(S,l)
+  alpha_em <- alpha
+  result <- list()
+  result[["A"]] <- A_em
+  result[["alpha"]] <- alpha_em
+  result[["Q"]] <- Q_em
+  return(result)
+}
+
+  
+```
+
+---------VEM---------
+
+
+```{R eval=FALSE, include=FALSE}
+m <- 100
+for (v in 1:m) {
+  r1 <- VE(A_em,Q_em, alpha_em,100)
+  mu_cavi <- r1$mu
+  if(sum(mu_cavi^2)==0)
+    break
+  sigma_cavi <- r1$sigma
+  Ew <- r1$Ew
+  Ez2 <- r1$Ez2
+  r2 <- VM(mu_cavi,sigma_cavi,Ew,Ez2)
+  temp1 <- A_em
+  temp2 <- Q_em
+  A_em <- r2$A
+  alpha_em <- r2$alpha
+  Q_em <- r2$Q
+  if(((abs(A_em-temp1)/A_em)<0.01)&((abs(Q_em-temp2)/Q_em)<0.01))
+    break
+}
+
+
+```
+
+
+----------you can ignore the text below(just for repetition)------------
+
+
+```{r eval=FALSE, include=FALSE}
+dat_gen <- function(A,Q,alpha){
+  T <- 100
+n <- 20
+
+
+al_sum <- al_sum_f(alpha)
+
+A <- A*diag(n)
+
+
+#mu1 <- -1
+#mu2 <- 1
+z <- matrix(0, nrow = n, ncol =T)
+#z[1:(n/2),1] <- mu1+rnormTrunc(n/2,0,1,min = -2,max = 2)
+#z[(n/2+1):n,1] <- mu2+rnormTrunc(n/2,0,1,min = -2,max = 2)
+z[,1] <- rnorm(n,0,1)
+for (t in 2:T) {
+  z[,t] <- A%*%z[,t-1]+Q*rnorm(n,0,1)
+}
+z_prod <- in_prod(t(z))
+
+theta <- array(0,c(n,n,T))
+
+Y <- array(0,c(n,n,T))
+
+theta <- al_sum+z_prod
+for (t in 1:T) {
+  for (i in 1:(n-1)) {
+   for (j in (i+1):n) {
+
+    Y[i,j,t] <- rbinom(1,1,plogis(theta[i,j,t]))
+  }
+}
+ Y[,,t][lower.tri(Y[,,t])] <- t(Y[,,t])[lower.tri(t(Y[,,t]))]
+ 
+}
+return(Y)
+}
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+result1 <- rep(0,10)
+result2 <- rep(0,10)
+for (r in 1:50) {
+  
+    alpha <- runif(n,min = 1,max = 3)
+    alpha <- -alpha/sum(alpha)
+    Y <- dat_gen(0.6,0.6,alpha)
+    A_em <- 0.9
+      Q_em <- 0.8
+      alpha_em <- alpha
+
+
+    m <- 50
+    for (v in 1:m) {
+      r1 <- VE(A_em,Q_em, alpha_em,100)
+      mu_cavi <- r1$mu
+      if(sum(mu_cavi^2)==0)
+        break
+      sigma_cavi <- r1$sigma
+      Ew <- r1$Ew
+      Ez2 <- r1$Ez2
+      r2 <- VM(mu_cavi,sigma_cavi,Ew,Ez2)
+      temp1 <- A_em
+      temp2 <- Q_em
+      A_em <- r2$A
+      alpha_em <- r2$alpha
+      Q_em <- r2$Q
+      if(((abs(A_em-temp1)/A_em)<0.001)&((abs(Q_em-temp2)/Q_em)<0.001))
+        break
+    }
+    result1[r] <- A_em
+    result2[r] <- Q_em
+  
+}
+
+```
+
+```{r}
+par(mfrow=c(1,2))
+boxplot(A_result)
+boxplot(Q_result)
+
+```
+
+
